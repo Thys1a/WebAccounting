@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, addDoc, doc, 
-  query, onSnapshot, serverTimestamp, orderBy, writeBatch, updateDoc 
+  query, onSnapshot, serverTimestamp, orderBy, writeBatch, updateDoc, deleteDoc, where, getDocs 
 } from 'firebase/firestore';
 import { 
   getAuth, onAuthStateChanged, signOut,
@@ -11,7 +11,7 @@ import {
 import { 
   Plus, Trash2, ArrowRight, ArrowLeft, 
   Download, Upload, Wallet, Link as LinkIcon, 
-  CheckCircle, RefreshCw, LogOut, Loader2, Edit, X
+  CheckCircle, RefreshCw, LogOut, Loader2, Edit, X, AlertTriangle
 } from 'lucide-react';
 
 // --- Configuration Strategy (双模自动切换) ---
@@ -41,7 +41,6 @@ if (!firebaseConfig) {
       };
       appId = import.meta.env.VITE_FIREBASE_APP_ID || 'default-app';
       console.log("✅ Environment: Production Mode (.env)");
-      console.log(firebaseConfig.projectId);
     }
   } catch (e) { console.warn("⚠️ Production config check skipped."); }
 }
@@ -84,12 +83,14 @@ export default function App() {
   const [boards, setBoards] = useState([]);
   const [transactions, setTransactions] = useState([]);
   
-  // Modals
+  // Modals & Editing State
   const [showAddCatModal, setShowAddCatModal] = useState(false);
   const [showAddBoardModal, setShowAddBoardModal] = useState(false);
   const [showAddTxModal, setShowAddTxModal] = useState(false);
   const [showSettleModal, setShowSettleModal] = useState(false);
   const [showEditBoardModal, setShowEditBoardModal] = useState(false);
+  
+  const [editingTx, setEditingTx] = useState(null); // 用于编辑流水
 
   // --- Authentication Listener ---
   useEffect(() => {
@@ -180,7 +181,7 @@ export default function App() {
     return () => { unsubCat(); unsubBoard(); unsubTx(); };
   }, [user]); 
 
-  // --- 修复：刷新后数据不可见的问题 ---
+  // --- 刷新后保持选中状态 ---
   useEffect(() => {
     if (categories.length > 0 && !activeCategory) {
       const defaultCat = categories.find(c => c.isDefault);
@@ -195,7 +196,7 @@ export default function App() {
     }
   }, [categories, activeCategory]);
 
-  // --- Core Logic Functions ---
+  // --- Category Logic ---
   const handleAddCategory = async (name) => {
     if (!name.trim() || !db) return;
     try {
@@ -225,6 +226,7 @@ export default function App() {
     await batch.commit();
   };
 
+  // --- Board Logic ---
   const handleAddBoard = async (data) => {
     if (!db) return;
     
@@ -289,6 +291,38 @@ export default function App() {
       }
   };
 
+  // 新增：删除账本（级联删除流水）
+  const handleDeleteBoard = async (boardId) => {
+    if (!window.confirm("确定要删除这个账本吗？所有相关流水也将被删除！")) return;
+    if (!db) return;
+
+    try {
+      const batch = writeBatch(db);
+      
+      // 1. 删除账本下的所有流水
+      const txsSnapshot = await getDocs(query(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), where("boardId", "==", boardId)));
+      txsSnapshot.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // 2. 删除账本本身
+      const boardRef = doc(db, 'artifacts', appId, 'users', user.uid, 'boards', boardId);
+      batch.delete(boardRef);
+
+      await batch.commit();
+      
+      // UI Reset
+      setShowEditBoardModal(false);
+      if (view === 'board-detail') {
+        setActiveBoard(null);
+        setView('dashboard');
+      }
+    } catch (e) {
+      console.error("Delete board failed", e);
+      alert("删除失败: " + e.message);
+    }
+  };
+
   const handleSettleBoard = async () => {
     if (!activeBoard || !activeBoard.parentId || !db) return;
     const boardTxs = transactions.filter(t => t.boardId === activeBoard.id);
@@ -328,19 +362,59 @@ export default function App() {
     setShowSettleModal(false);
   };
 
-  const handleAddTransaction = async (data) => {
+  // --- Transaction Logic ---
+  const handleSaveTransaction = async (data) => {
     if (!db) return;
     if (!activeBoard) return alert("系统错误：未检测到当前账本");
-    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), {
-      boardId: activeBoard.id,
-      amount: data.type === 'expense' ? -Math.abs(data.amount) : Math.abs(data.amount),
-      description: data.description,
-      type: 'normal',
-      date: new Date().toISOString()
-    });
-    setShowAddTxModal(false);
+
+    try {
+      const txData = {
+        boardId: activeBoard.id,
+        amount: data.type === 'expense' ? -Math.abs(data.amount) : Math.abs(data.amount),
+        description: data.description,
+        type: 'normal', // 回退到默认 normal
+        date: new Date().toISOString()
+      };
+
+      if (editingTx) {
+        // Update Existing
+        const txRef = doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', editingTx.id);
+        await updateDoc(txRef, txData);
+      } else {
+        // Create New
+        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), txData);
+      }
+      
+      setShowAddTxModal(false);
+      setEditingTx(null); // Reset editing state
+    } catch (e) {
+      console.error(e);
+      alert("保存失败");
+    }
   };
 
+  const handleDeleteTransaction = async (txId) => {
+    if (!window.confirm("确认删除这条记录吗？")) return;
+    if (!db) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', txId));
+    } catch (e) {
+      console.error(e);
+      alert("删除失败");
+    }
+  };
+
+  const openAddTxModal = () => {
+    setEditingTx(null);
+    setShowAddTxModal(true);
+  };
+
+  const openEditTxModal = (tx) => {
+    setEditingTx(tx);
+    setShowAddTxModal(true);
+  };
+
+  // --- Import/Export Logic ---
   const handleExportCSV = () => {
     if (!activeBoard) return;
     const boardTxs = transactions.filter(t => t.boardId === activeBoard.id);
@@ -360,6 +434,7 @@ export default function App() {
   const handleImportCSV = (e) => {
     const file = e.target.files[0];
     if (!file || !db) return;
+    
     let targetCatId = activeCategory?.id;
     if (!targetCatId) {
         const def = categories.find(c => c.isDefault);
@@ -405,7 +480,8 @@ export default function App() {
       await batch.commit();
       alert("导入成功！");
     };
-    reader.readAsText(file);
+    // 修复：指定 'GBK' 编码来解决中文乱码 (通常 Excel CSV 是 GBK/GB2312)
+    reader.readAsText(file, 'GBK'); 
   };
 
   const getBoardBalance = (boardId) => {
@@ -566,7 +642,6 @@ export default function App() {
             <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
               {view === 'dashboard' ? activeCategory?.name : activeBoard?.name}
               
-              {/* 编辑账本按钮 */}
               {view === 'board-detail' && activeBoard && (
                  <button 
                     onClick={() => setShowEditBoardModal(true)}
@@ -590,12 +665,18 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-3">
+             {view === 'dashboard' && (
+               <>
+                 <label className="cursor-pointer flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition-colors" title="Import CSV">
+                    <input type="file" accept=".csv" className="hidden" onChange={handleImportCSV} />
+                    <Upload className="w-4 h-4" />
+                    <span>导入账本</span>
+                 </label>
+               </>
+             )}
+             
              {view === 'board-detail' && (
                <>
-                 <label className="cursor-pointer p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" title="Import CSV">
-                    <input type="file" accept=".csv" className="hidden" onChange={handleImportCSV} />
-                    <Upload className="w-5 h-5" />
-                 </label>
                  <button onClick={handleExportCSV} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" title="Export CSV">
                     <Download className="w-5 h-5" />
                  </button>
@@ -677,7 +758,7 @@ export default function App() {
                 </div>
                 {activeBoard.status === 'active' && (
                   <button 
-                    onClick={() => setShowAddTxModal(true)}
+                    onClick={openAddTxModal}
                     className="bg-slate-900 hover:bg-slate-800 text-white px-6 py-3 rounded-xl font-medium flex items-center gap-2 shadow-lg shadow-slate-900/20 transition-all hover:scale-105 active:scale-95"
                   >
                     <Plus className="w-5 h-5" /> 记一笔
@@ -707,13 +788,37 @@ export default function App() {
                               <Wallet className="w-5 h-5" />}
                           </div>
                           <div>
-                            <div className="font-medium text-slate-800">{tx.description}</div>
+                            <div className="font-medium text-slate-800 flex items-center gap-2">
+                                {tx.description}
+                            </div>
                             <div className="text-xs text-slate-400">{new Date(tx.date).toLocaleString()}</div>
                           </div>
                         </div>
-                        <div className={`font-bold font-mono text-lg 
-                           ${parseFloat(tx.amount) > 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
-                          {parseFloat(tx.amount) > 0 ? '+' : ''}{parseFloat(tx.amount).toLocaleString()}
+                        <div className="flex items-center gap-6">
+                            <div className={`font-bold font-mono text-lg 
+                               ${parseFloat(tx.amount) > 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
+                              {parseFloat(tx.amount) > 0 ? '+' : ''}{parseFloat(tx.amount).toLocaleString()}
+                            </div>
+                            
+                            {/* 流水操作按钮 (编辑/删除) */}
+                            {activeBoard.status === 'active' && (
+                                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <button 
+                                        onClick={() => openEditTxModal(tx)}
+                                        className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" 
+                                        title="编辑"
+                                    >
+                                        <Edit className="w-4 h-4" />
+                                    </button>
+                                    <button 
+                                        onClick={() => handleDeleteTransaction(tx.id)}
+                                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded" 
+                                        title="删除"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            )}
                         </div>
                       </div>
                     ))
@@ -796,9 +901,18 @@ export default function App() {
                 ))}
               </select>
 
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setShowEditBoardModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
-                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存修改</button>
+              <div className="flex justify-between pt-2 border-t border-slate-100">
+                <button 
+                    type="button" 
+                    onClick={() => handleDeleteBoard(activeBoard.id)} 
+                    className="px-4 py-2 text-red-500 hover:bg-red-50 rounded-lg flex items-center gap-1 text-sm font-medium"
+                >
+                    <Trash2 className="w-4 h-4" /> 删除账本
+                </button>
+                <div className="flex gap-2">
+                    <button type="button" onClick={() => setShowEditBoardModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
+                    <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存修改</button>
+                </div>
               </div>
             </form>
           </div>
@@ -809,18 +923,43 @@ export default function App() {
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="bg-white p-6 rounded-2xl w-96 shadow-2xl relative">
             <button onClick={()=>setShowAddTxModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
-            <h3 className="text-lg font-bold mb-4">记一笔</h3>
+            <h3 className="text-lg font-bold mb-4">{editingTx ? "编辑记录" : "记一笔"}</h3>
             <form onSubmit={(e) => {
               e.preventDefault();
               const fd = new FormData(e.target);
-              handleAddTransaction({ amount: fd.get('amount'), description: fd.get('desc'), type: fd.get('type') });
+              handleSaveTransaction({ 
+                  amount: fd.get('amount'), 
+                  description: fd.get('desc'), 
+                  type: fd.get('type')
+              });
             }}>
               <div className="flex gap-2 mb-4 bg-slate-100 p-1 rounded-lg">
-                <label className="flex-1 text-center cursor-pointer"><input type="radio" name="type" value="expense" defaultChecked className="hidden peer" /><span className="block py-2 rounded peer-checked:bg-white peer-checked:text-rose-600 shadow-sm transition-all">支出</span></label>
-                <label className="flex-1 text-center cursor-pointer"><input type="radio" name="type" value="income" className="hidden peer" /><span className="block py-2 rounded peer-checked:bg-white peer-checked:text-emerald-600 shadow-sm transition-all">收入</span></label>
+                <label className="flex-1 text-center cursor-pointer">
+                    <input type="radio" name="type" value="expense" defaultChecked={!editingTx || parseFloat(editingTx.amount) < 0} className="hidden peer" />
+                    <span className="block py-2 rounded peer-checked:bg-white peer-checked:text-rose-600 shadow-sm transition-all">支出</span>
+                </label>
+                <label className="flex-1 text-center cursor-pointer">
+                    <input type="radio" name="type" value="income" defaultChecked={editingTx && parseFloat(editingTx.amount) > 0} className="hidden peer" />
+                    <span className="block py-2 rounded peer-checked:bg-white peer-checked:text-emerald-600 shadow-sm transition-all">收入</span>
+                </label>
               </div>
-              <input name="amount" type="number" step="0.01" required placeholder="0.00" className="w-full text-3xl font-bold text-center border-b-2 p-4 mb-4 outline-none bg-transparent" />
-              <input name="desc" required placeholder="备注" className="w-full border border-slate-300 rounded-lg p-3 mb-6 outline-none" />
+              <input 
+                name="amount" 
+                type="number" 
+                step="0.01" 
+                required 
+                placeholder="0.00" 
+                defaultValue={editingTx ? Math.abs(parseFloat(editingTx.amount)) : ''}
+                className="w-full text-3xl font-bold text-center border-b-2 p-4 mb-4 outline-none bg-transparent" 
+              />
+              
+              <input 
+                name="desc" 
+                required 
+                placeholder="备注" 
+                defaultValue={editingTx?.description || ''}
+                className="w-full border border-slate-300 rounded-lg p-3 mb-6 outline-none focus:border-indigo-500" 
+              />
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setShowAddTxModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
                 <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存</button>
