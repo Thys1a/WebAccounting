@@ -20,20 +20,20 @@ import {
 // 当您部署到 GitHub Pages 或本地运行时，请删除下面的 try-catch 块，
 // 并取消注释更下方的 "Production Configuration" 代码块。
 
-let firebaseConfig;
-let appId;
+// let firebaseConfig;
+// let appId;
 
-try {
-  // 预览环境专用配置
-  firebaseConfig = JSON.parse(__firebase_config);
-  appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-} catch (e) {
-  // 本地/生产环境回退配置 (防止报错)
-  firebaseConfig = {}; 
-  appId = 'default-app';
-}
+// try {
+//   // 预览环境专用配置
+//   firebaseConfig = JSON.parse(__firebase_config);
+//   appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+// } catch (e) {
+//   // 本地/生产环境回退配置 (防止报错)
+//   firebaseConfig = {}; 
+//   appId = 'default-app';
+// }
 
-/* // --- Production Configuration (部署时请取消注释此段) ---
+// --- Production Configuration (部署时请取消注释此段) ---
 // 务必确保 .env 文件中有这些变量，且以 VITE_ 开头
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -44,7 +44,7 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 const appId = import.meta.env.VITE_FIREBASE_APP_ID || 'default-app';
-*/
+
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
