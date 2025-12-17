@@ -19,12 +19,12 @@ import {
 // const firebaseConfig = JSON.parse(__firebase_config);
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAJzUcpyO9oacktLDsjj94wcbz6lHOm-Yo",
-  authDomain: "web-accounting-482a0.firebaseapp.com",
-  projectId: "web-accounting-482a0",
-  storageBucket: "web-accounting-482a0.firebasestorage.app",
-  messagingSenderId: "1024117334016",
-  appId: "1:1024117334016:web:649f65fe4c6209a94f78e5"
+  apiKey:VITE_FIREBASE_API_KEY,
+  authDomain: VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: VITE_FIREBASE_PROJECT_ID,
+  storageBucket: VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId:VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId:VITE_FIREBASE_APP_ID
 };
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
