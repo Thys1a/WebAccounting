@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, addDoc, doc, 
@@ -11,7 +11,7 @@ import {
 import { 
   Plus, Trash2, ArrowRight, ArrowLeft, 
   Download, Upload, Wallet, Link as LinkIcon, 
-  CheckCircle, RefreshCw, LogOut, Loader2, Edit, X, AlertTriangle
+  CheckCircle, RefreshCw, LogOut, Loader2, Edit, X, Tag, Calculator
 } from 'lucide-react';
 
 // --- Configuration Strategy (双模自动切换) ---
@@ -90,7 +90,7 @@ export default function App() {
   const [showSettleModal, setShowSettleModal] = useState(false);
   const [showEditBoardModal, setShowEditBoardModal] = useState(false);
   
-  const [editingTx, setEditingTx] = useState(null); // 用于编辑流水
+  const [editingTx, setEditingTx] = useState(null);
 
   // --- Authentication Listener ---
   useEffect(() => {
@@ -109,7 +109,7 @@ export default function App() {
   const handleAuth = async (e) => {
     e.preventDefault();
     if (!auth) {
-      setAuthError("Firebase 配置错误 (请检查 Project ID)");
+      setAuthError("Firebase 配置错误");
       return;
     }
     setAuthError('');
@@ -126,11 +126,9 @@ export default function App() {
       }
     } catch (error) {
       console.error(error);
-      let msg = "认证失败，请重试。";
-      if (error.code === 'auth/invalid-credential') msg = "邮箱或密码错误。";
-      if (error.code === 'auth/email-already-in-use') msg = "该邮箱已被注册。";
-      if (error.code === 'auth/weak-password') msg = "密码太弱 (至少6位)。";
-      if (error.code === 'auth/invalid-api-key') msg = "API Key 无效 (请检查 .env 文件)。";
+      let msg = "认证失败";
+      if (error.code === 'auth/invalid-credential') msg = "邮箱或密码错误";
+      if (error.code === 'auth/weak-password') msg = "密码太弱 (至少6位)";
       setAuthError(msg);
     } finally {
       setIsSubmitting(false);
@@ -151,28 +149,22 @@ export default function App() {
   useEffect(() => {
     if (!user || !db) return;
 
-    // 1. Categories
     const catQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'categories'), orderBy('createdAt', 'asc'));
     const unsubCat = onSnapshot(catQuery, (snapshot) => {
       const cats = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       setCategories(cats);
-      
       if (cats.length === 0) {
         addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'categories'), {
-          name: '默认分类',
-          isDefault: true,
-          createdAt: serverTimestamp()
+          name: '默认分类', isDefault: true, createdAt: serverTimestamp()
         });
       } 
     }, (err) => console.error("Cat Error:", err));
 
-    // 2. Boards
     const boardQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'boards'));
     const unsubBoard = onSnapshot(boardQuery, (snapshot) => {
       setBoards(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (err) => console.error("Board Error:", err));
 
-    // 3. Transactions
     const txQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), orderBy('date', 'desc'));
     const unsubTx = onSnapshot(txQuery, (snapshot) => {
       setTransactions(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -181,7 +173,6 @@ export default function App() {
     return () => { unsubCat(); unsubBoard(); unsubTx(); };
   }, [user]); 
 
-  // --- 刷新后保持选中状态 ---
   useEffect(() => {
     if (categories.length > 0 && !activeCategory) {
       const defaultCat = categories.find(c => c.isDefault);
@@ -196,7 +187,25 @@ export default function App() {
     }
   }, [categories, activeCategory]);
 
-  // --- Category Logic ---
+  // --- Helpers ---
+  const getBoardBalance = (boardId) => {
+    return transactions
+      .filter(t => t.boardId === boardId)
+      .reduce((acc, t) => acc + parseFloat(t.amount), 0);
+  };
+
+  // 🔥 Feature: Calculate Total Balance for Current Category
+  const categoryTotalBalance = useMemo(() => {
+    if (!activeCategory) return 0;
+    const catBoards = boards.filter(b => b.categoryId === activeCategory.id && b.status !== 'closed');
+    return catBoards.reduce((sum, board) => sum + getBoardBalance(board.id), 0);
+  }, [boards, transactions, activeCategory]);
+
+  const currentBoardList = boards.filter(b => b.categoryId === activeCategory?.id);
+  const currentBoardTxs = transactions.filter(t => t.boardId === activeBoard?.id);
+  const currentBoardBalance = activeBoard ? getBoardBalance(activeBoard.id) : 0;
+
+  // --- Core Logic Functions ---
   const handleAddCategory = async (name) => {
     if (!name.trim() || !db) return;
     try {
@@ -226,20 +235,15 @@ export default function App() {
     await batch.commit();
   };
 
-  // --- Board Logic ---
   const handleAddBoard = async (data) => {
     if (!db) return;
     
     let targetCategoryId = activeCategory?.id;
     if (!targetCategoryId) {
         const defaultCat = categories.find(c => c.isDefault);
-        if (defaultCat) {
-            targetCategoryId = defaultCat.id;
-        } else if (categories.length > 0) {
-            targetCategoryId = categories[0].id;
-        } else {
-            return alert("系统错误：没有可用的分类");
-        }
+        if (defaultCat) targetCategoryId = defaultCat.id;
+        else if (categories.length > 0) targetCategoryId = categories[0].id;
+        else return alert("系统错误：没有可用的分类");
     }
 
     const batch = writeBatch(db);
@@ -276,121 +280,77 @@ export default function App() {
       if (!db || !boardId) return;
       try {
           const boardRef = doc(db, 'artifacts', appId, 'users', user.uid, 'boards', boardId);
-          await updateDoc(boardRef, {
-              name: newName,
-              categoryId: newCategoryId
-          });
-          
+          await updateDoc(boardRef, { name: newName, categoryId: newCategoryId });
           if (activeBoard && activeBoard.id === boardId) {
              setActiveBoard(prev => ({...prev, name: newName, categoryId: newCategoryId}));
           }
           setShowEditBoardModal(false);
       } catch (e) {
-          console.error("Update board failed", e);
           alert("更新失败");
       }
   };
 
-  // 新增：删除账本（级联删除流水）
   const handleDeleteBoard = async (boardId) => {
     if (!window.confirm("确定要删除这个账本吗？所有相关流水也将被删除！")) return;
     if (!db) return;
-
     try {
       const batch = writeBatch(db);
-      
-      // 1. 删除账本下的所有流水
       const txsSnapshot = await getDocs(query(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), where("boardId", "==", boardId)));
-      txsSnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
-
-      // 2. 删除账本本身
-      const boardRef = doc(db, 'artifacts', appId, 'users', user.uid, 'boards', boardId);
-      batch.delete(boardRef);
-
+      txsSnapshot.forEach((doc) => batch.delete(doc.ref));
+      batch.delete(doc(db, 'artifacts', appId, 'users', user.uid, 'boards', boardId));
       await batch.commit();
-      
-      // UI Reset
       setShowEditBoardModal(false);
       if (view === 'board-detail') {
         setActiveBoard(null);
         setView('dashboard');
       }
-    } catch (e) {
-      console.error("Delete board failed", e);
-      alert("删除失败: " + e.message);
-    }
+    } catch (e) { alert("删除失败: " + e.message); }
   };
 
   const handleSettleBoard = async () => {
     if (!activeBoard || !activeBoard.parentId || !db) return;
     const boardTxs = transactions.filter(t => t.boardId === activeBoard.id);
     const balance = boardTxs.reduce((sum, t) => sum + parseFloat(t.amount), 0);
-    
     const batch = writeBatch(db);
     const now = new Date().toISOString();
 
     if (balance > 0) {
       const childRef = doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'));
-      batch.set(childRef, {
-        boardId: activeBoard.id, amount: -balance, type: 'return_out',
-        description: '结余归还 -> 父账本', date: now
-      });
+      batch.set(childRef, { boardId: activeBoard.id, amount: -balance, type: 'return_out', description: '结余归还 -> 父账本', date: now });
       const parentRef = doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'));
-      batch.set(parentRef, {
-        boardId: activeBoard.parentId, amount: balance, type: 'return_in',
-        description: `资金退回 <- ${activeBoard.name}`, date: now
-      });
+      batch.set(parentRef, { boardId: activeBoard.parentId, amount: balance, type: 'return_in', description: `资金退回 <- ${activeBoard.name}`, date: now });
     } else if (balance < 0) {
       const absBal = Math.abs(balance);
       const childRef = doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'));
-      batch.set(childRef, {
-        boardId: activeBoard.id, amount: absBal, type: 'cover_in',
-        description: '超支补足 <- 父账本', date: now
-      });
+      batch.set(childRef, { boardId: activeBoard.id, amount: absBal, type: 'cover_in', description: '超支补足 <- 父账本', date: now });
       const parentRef = doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'));
-      batch.set(parentRef, {
-        boardId: activeBoard.parentId, amount: -absBal, type: 'cover_out',
-        description: `填补亏空 -> ${activeBoard.name}`, date: now
-      });
+      batch.set(parentRef, { boardId: activeBoard.parentId, amount: -absBal, type: 'cover_out', description: `填补亏空 -> ${activeBoard.name}`, date: now });
     }
     const boardRef = doc(db, 'artifacts', appId, 'users', user.uid, 'boards', activeBoard.id);
     batch.update(boardRef, { status: 'closed' });
-
     await batch.commit();
     setShowSettleModal(false);
   };
 
-  // --- Transaction Logic ---
   const handleSaveTransaction = async (data) => {
     if (!db) return;
     if (!activeBoard) return alert("系统错误：未检测到当前账本");
-
     try {
       const txData = {
         boardId: activeBoard.id,
         amount: data.type === 'expense' ? -Math.abs(data.amount) : Math.abs(data.amount),
         description: data.description,
-        type: 'normal', // 回退到默认 normal
+        type: 'normal',
         date: new Date().toISOString()
       };
-
       if (editingTx) {
-        // Update Existing
-        const txRef = doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', editingTx.id);
-        await updateDoc(txRef, txData);
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', editingTx.id), txData);
       } else {
-        // Create New
         await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), txData);
       }
-      
       setShowAddTxModal(false);
-      setEditingTx(null); // Reset editing state
-    } catch (e) {
-      console.error(e);
-      alert("保存失败");
-    }
+      setEditingTx(null);
+    } catch (e) { alert("保存失败"); }
   };
 
   const handleDeleteTransaction = async (txId) => {
@@ -398,23 +358,13 @@ export default function App() {
     if (!db) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', txId));
-    } catch (e) {
-      console.error(e);
-      alert("删除失败");
-    }
+    } catch (e) { alert("删除失败"); }
   };
 
-  const openAddTxModal = () => {
-    setEditingTx(null);
-    setShowAddTxModal(true);
-  };
+  const openAddTxModal = () => { setEditingTx(null); setShowAddTxModal(true); };
+  const openEditTxModal = (tx) => { setEditingTx(tx); setShowAddTxModal(true); };
 
-  const openEditTxModal = (tx) => {
-    setEditingTx(tx);
-    setShowAddTxModal(true);
-  };
-
-  // --- Import/Export Logic ---
+  // --- CSV Import/Export ---
   const handleExportCSV = () => {
     if (!activeBoard) return;
     const boardTxs = transactions.filter(t => t.boardId === activeBoard.id);
@@ -431,7 +381,7 @@ export default function App() {
     link.click();
   };
 
-  const handleImportCSV = (e) => {
+  const handleImportBoardCSV = (e) => {
     const file = e.target.files[0];
     if (!file || !db) return;
     
@@ -454,9 +404,7 @@ export default function App() {
       const newBoardRef = await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'boards'), {
         name: boardName + ' (Imported)',
         categoryId: targetCatId, 
-        parentId: null,
-        status: 'active',
-        createdAt: serverTimestamp()
+        parentId: null, status: 'active', createdAt: serverTimestamp()
       });
 
       const batch = writeBatch(db);
@@ -468,108 +416,82 @@ export default function App() {
         const description = parts[1] ? parts[1].replace(/"/g, '') : ''; 
         const amount = parseFloat(parts[2]);
         const type = parts[3]?.trim() || 'normal';
-
         if (!isNaN(amount)) {
-            const txRef = doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'));
-            batch.set(txRef, {
-                boardId: newBoardRef.id,
-                amount, description, date, type
+            batch.set(doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions')), {
+                boardId: newBoardRef.id, amount, description, date, type
             });
         }
       }
       await batch.commit();
       alert("导入成功！");
     };
-    // 修复：指定 'GBK' 编码来解决中文乱码 (通常 Excel CSV 是 GBK/GB2312)
     reader.readAsText(file, 'GBK'); 
   };
 
-  const getBoardBalance = (boardId) => {
-    return transactions
-      .filter(t => t.boardId === boardId)
-      .reduce((acc, t) => acc + parseFloat(t.amount), 0);
+  // 🔥 Feature: Import partial transactions into CURRENT board
+  const handleImportTransactionsToBoard = (e) => {
+    const file = e.target.files[0];
+    if (!file || !db || !activeBoard) return;
+
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      const text = evt.target.result;
+      const lines = text.split('\n');
+      if (lines.length < 2) return alert("文件格式错误");
+
+      // Heuristic: Check where data starts (skipping metadata if present)
+      let startRowIndex = 0;
+      if (lines[0].startsWith('BoardName')) startRowIndex = 2; // Full export format
+      else if (lines[0].startsWith('Date')) startRowIndex = 1; // Header only
+
+      const batch = writeBatch(db);
+      let count = 0;
+
+      for (let i = startRowIndex; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        
+        const parts = line.split(','); 
+        const date = parts[0];
+        const description = parts[1] ? parts[1].replace(/"/g, '') : ''; 
+        const amount = parseFloat(parts[2]);
+        const type = parts[3]?.trim() || 'normal';
+
+        if (!isNaN(amount)) {
+            batch.set(doc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions')), {
+                boardId: activeBoard.id, // Append to current board
+                amount, description, date, type
+            });
+            count++;
+        }
+      }
+      if (count > 0) {
+          await batch.commit();
+          alert(`成功导入 ${count} 条流水到 "${activeBoard.name}"`);
+      } else {
+          alert("未找到有效数据");
+      }
+    };
+    reader.readAsText(file, 'GBK');
   };
 
-  const currentBoardList = boards.filter(b => b.categoryId === activeCategory?.id);
-  const currentBoardTxs = transactions.filter(t => t.boardId === activeBoard?.id);
-  const currentBoardBalance = activeBoard ? getBoardBalance(activeBoard.id) : 0;
-
   // --- Render: Auth & Loading ---
-  if (authLoading) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-slate-50 text-slate-400">
-        <Loader2 className="w-8 h-8 animate-spin" />
-      </div>
-    );
-  }
+  if (authLoading) return <div className="h-screen flex items-center justify-center bg-slate-50 text-slate-400"><Loader2 className="w-8 h-8 animate-spin" /></div>;
 
   if (!user) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-slate-50 text-slate-800 p-4">
-        <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center mb-6 shadow-xl">
-          <Wallet className="w-8 h-8 text-emerald-400" />
-        </div>
+        <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center mb-6 shadow-xl"><Wallet className="w-8 h-8 text-emerald-400" /></div>
         <h1 className="text-3xl font-bold mb-2">FinanceFlow Pro</h1>
-        <p className="text-slate-500 mb-8 text-center max-w-sm">
-          {isSignUp ? "创建您的账户以开始同步数据" : "登录以访问您的云端账本"}
-        </p>
-        
+        <p className="text-slate-500 mb-8 text-center max-w-sm">{isSignUp ? "创建您的账户以开始同步数据" : "登录以访问您的云端账本"}</p>
         <form onSubmit={handleAuth} className="w-full max-w-sm bg-white p-8 rounded-2xl shadow-lg border border-slate-100">
-          {authError && (
-             <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex items-center gap-2">
-               <span className="font-bold">Error:</span> {authError}
-             </div>
-          )}
-          {!firebaseConfig.apiKey && (
-             <div className="mb-4 p-3 bg-yellow-50 text-yellow-700 text-xs rounded-lg">
-               ⚠️ 未检测到配置。本地运行请确保 .env 文件存在。
-             </div>
-          )}
-          
+          {authError && <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg font-bold">Error: {authError}</div>}
           <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">电子邮箱</label>
-              <input 
-                type="email" 
-                required
-                className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-                placeholder="name@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">密码</label>
-              <input 
-                type="password" 
-                required
-                minLength={6}
-                className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
+            <div><label className="block text-sm font-medium text-slate-700 mb-1">电子邮箱</label><input type="email" required className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-indigo-500 outline-none" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+            <div><label className="block text-sm font-medium text-slate-700 mb-1">密码</label><input type="password" required minLength={6} className="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-indigo-500 outline-none" value={password} onChange={(e) => setPassword(e.target.value)} /></div>
           </div>
-
-          <button 
-            type="submit" 
-            disabled={isSubmitting}
-            className="w-full mt-6 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center"
-          >
-            {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : (isSignUp ? "注册账号" : "立即登录")}
-          </button>
-
-          <div className="mt-6 text-center text-sm text-slate-500">
-            {isSignUp ? "已有账号？" : "还没有账号？"} 
-            <button 
-              type="button"
-              onClick={() => { setIsSignUp(!isSignUp); setAuthError(''); }}
-              className="ml-1 text-indigo-600 font-bold hover:underline"
-            >
-              {isSignUp ? "去登录" : "免费注册"}
-            </button>
-          </div>
+          <button type="submit" disabled={isSubmitting} className="w-full mt-6 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl transition-all shadow-md flex justify-center items-center">{isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : (isSignUp ? "注册账号" : "立即登录")}</button>
+          <div className="mt-6 text-center text-sm text-slate-500">{isSignUp ? "已有账号？" : "还没有账号？"} <button type="button" onClick={() => { setIsSignUp(!isSignUp); setAuthError(''); }} className="ml-1 text-indigo-600 font-bold hover:underline">{isSignUp ? "去登录" : "免费注册"}</button></div>
         </form>
       </div>
     );
@@ -582,47 +504,19 @@ export default function App() {
       {/* SIDEBAR */}
       <div className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-xl z-20">
         <div className="p-6">
-          <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            <Wallet className="w-6 h-6 text-emerald-400" />
-            FinanceFlow
-          </h1>
+          <h1 className="text-xl font-bold text-white flex items-center gap-2"><Wallet className="w-6 h-6 text-emerald-400" />FinanceFlow</h1>
           <div className="mt-4 flex items-center gap-2 text-xs text-slate-500 bg-slate-800/50 p-2 rounded-lg">
-             <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center text-white font-bold shrink-0">
-               {user.displayName?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase()}
-             </div>
-             <div className="flex flex-col overflow-hidden">
-               <span className="truncate font-medium text-slate-300">{user.displayName || '用户'}</span>
-               <span className="truncate text-[10px]">{user.email}</span>
-             </div>
-             <button onClick={handleLogout} title="退出登录" className="ml-auto hover:text-white p-1">
-               <LogOut className="w-4 h-4" />
-             </button>
+             <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center text-white font-bold shrink-0">{user.displayName?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase()}</div>
+             <div className="flex flex-col overflow-hidden"><span className="truncate font-medium text-slate-300">{user.displayName || '用户'}</span><span className="truncate text-[10px]">{user.email}</span></div>
+             <button onClick={handleLogout} title="退出登录" className="ml-auto hover:text-white p-1"><LogOut className="w-4 h-4" /></button>
           </div>
         </div>
-        
         <div className="flex-1 overflow-y-auto px-4 space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 mt-4">
-            <span>Categories</span>
-            <button onClick={() => setShowAddCatModal(true)} className="hover:text-white transition-colors">
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
-          
+          <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 mt-4"><span>Categories</span><button onClick={() => setShowAddCatModal(true)} className="hover:text-white transition-colors"><Plus className="w-4 h-4" /></button></div>
           {categories.map(cat => (
-            <div 
-              key={cat.id}
-              onClick={() => { setActiveCategory(cat); setView('dashboard'); }}
-              className={`group flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all duration-200 ${activeCategory?.id === cat.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'hover:bg-slate-800'}`}
-            >
+            <div key={cat.id} onClick={() => { setActiveCategory(cat); setView('dashboard'); }} className={`group flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all duration-200 ${activeCategory?.id === cat.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'hover:bg-slate-800'}`}>
               <span className="truncate font-medium">{cat.name}</span>
-              {!cat.isDefault && (
-                <button 
-                  onClick={(e) => { e.stopPropagation(); handleDeleteCategory(cat.id); }}
-                  className="opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity p-1"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              )}
+              {!cat.isDefault && <button onClick={(e) => { e.stopPropagation(); handleDeleteCategory(cat.id); }} className="opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity p-1"><Trash2 className="w-3 h-3" /></button>}
             </div>
           ))}
         </div>
@@ -634,60 +528,45 @@ export default function App() {
         {/* Top Navigation Bar */}
         <header className="h-16 bg-white border-b border-slate-200 flex items-center px-8 justify-between shadow-sm z-10">
           <div className="flex items-center gap-4">
-            {view === 'board-detail' && (
-              <button onClick={() => setView('dashboard')} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500">
-                <ArrowLeft className="w-5 h-5" />
-              </button>
-            )}
-            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-              {view === 'dashboard' ? activeCategory?.name : activeBoard?.name}
-              
-              {view === 'board-detail' && activeBoard && (
-                 <button 
-                    onClick={() => setShowEditBoardModal(true)}
-                    className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-                    title="编辑/移动账本"
-                 >
-                    <Edit className="w-4 h-4" />
-                 </button>
-              )}
-            </h2>
-            {view === 'board-detail' && activeBoard?.parentId && (
-              <span className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 px-2 py-1 rounded-full border border-blue-100">
-                <LinkIcon className="w-3 h-3" /> 子账本
-              </span>
-            )}
-             {view === 'board-detail' && activeBoard?.status === 'closed' && (
-              <span className="flex items-center gap-1 text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded-full border border-slate-200">
-                <CheckCircle className="w-3 h-3" /> 已归档
-              </span>
-            )}
+            {view === 'board-detail' && <button onClick={() => setView('dashboard')} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"><ArrowLeft className="w-5 h-5" /></button>}
+            
+            <div className="flex items-baseline gap-3">
+                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                {view === 'dashboard' ? activeCategory?.name : activeBoard?.name}
+                {view === 'board-detail' && activeBoard && <button onClick={() => setShowEditBoardModal(true)} className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="编辑/移动账本"><Edit className="w-4 h-4" /></button>}
+                </h2>
+                
+                {/* 类目总余额显示 (仅在首页显示) */}
+                {view === 'dashboard' && activeCategory && (
+                    <span className={`text-sm font-mono font-medium px-2 py-0.5 rounded ${categoryTotalBalance >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+                        Total: {categoryTotalBalance >= 0 ? '+' : ''}{categoryTotalBalance.toLocaleString()}
+                    </span>
+                )}
+            </div>
+
+            {view === 'board-detail' && activeBoard?.parentId && <span className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 px-2 py-1 rounded-full border border-blue-100"><LinkIcon className="w-3 h-3" /> 子账本</span>}
+            {view === 'board-detail' && activeBoard?.status === 'closed' && <span className="flex items-center gap-1 text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded-full border border-slate-200"><CheckCircle className="w-3 h-3" /> 已归档</span>}
           </div>
           
           <div className="flex items-center gap-3">
              {view === 'dashboard' && (
-               <>
-                 <label className="cursor-pointer flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition-colors" title="Import CSV">
-                    <input type="file" accept=".csv" className="hidden" onChange={handleImportCSV} />
-                    <Upload className="w-4 h-4" />
-                    <span>导入账本</span>
-                 </label>
-               </>
+               <label className="cursor-pointer flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition-colors" title="Import Board">
+                  <input type="file" accept=".csv" className="hidden" onChange={handleImportBoardCSV} />
+                  <Upload className="w-4 h-4" /> <span>导入新账本</span>
+               </label>
              )}
              
              {view === 'board-detail' && (
                <>
-                 <button onClick={handleExportCSV} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" title="Export CSV">
-                    <Download className="w-5 h-5" />
-                 </button>
+                 {/* 账本详情页：导入流水到当前账本 */}
+                 <label className="cursor-pointer p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="导入流水到此账本">
+                    <input type="file" accept=".csv" className="hidden" onChange={handleImportTransactionsToBoard} />
+                    <Upload className="w-5 h-5" />
+                 </label>
+
+                 <button onClick={handleExportCSV} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" title="Export CSV"><Download className="w-5 h-5" /></button>
                  {activeBoard?.parentId && activeBoard.status === 'active' && (
-                    <button 
-                      onClick={() => setShowSettleModal(true)}
-                      className="flex items-center gap-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-                    >
-                      <RefreshCw className="w-4 h-4" />
-                      结算归还
-                    </button>
+                    <button onClick={() => setShowSettleModal(true)} className="flex items-center gap-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-4 py-2 rounded-lg text-sm font-medium transition-colors"><RefreshCw className="w-4 h-4" /> 结算归还</button>
                  )}
                </>
              )}
@@ -701,43 +580,22 @@ export default function App() {
           {view === 'dashboard' && (
             <div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                <button 
-                  onClick={() => setShowAddBoardModal(true)}
-                  className="group flex flex-col items-center justify-center h-48 rounded-xl border-2 border-dashed border-slate-300 hover:border-indigo-400 hover:bg-indigo-50 transition-all cursor-pointer"
-                >
-                  <div className="w-12 h-12 rounded-full bg-slate-100 group-hover:bg-indigo-100 flex items-center justify-center mb-3 transition-colors">
-                    <Plus className="w-6 h-6 text-slate-400 group-hover:text-indigo-500" />
-                  </div>
+                <button onClick={() => setShowAddBoardModal(true)} className="group flex flex-col items-center justify-center h-48 rounded-xl border-2 border-dashed border-slate-300 hover:border-indigo-400 hover:bg-indigo-50 transition-all cursor-pointer">
+                  <div className="w-12 h-12 rounded-full bg-slate-100 group-hover:bg-indigo-100 flex items-center justify-center mb-3 transition-colors"><Plus className="w-6 h-6 text-slate-400 group-hover:text-indigo-500" /></div>
                   <span className="text-slate-500 font-medium group-hover:text-indigo-600">新建账本</span>
                 </button>
 
                 {currentBoardList.map(board => {
                    const bal = getBoardBalance(board.id);
                    return (
-                    <div 
-                      key={board.id}
-                      onClick={() => { setActiveBoard(board); setView('board-detail'); }}
-                      className={`relative bg-white p-6 rounded-xl shadow-sm border border-slate-200 hover:shadow-md hover:-translate-y-1 transition-all cursor-pointer flex flex-col justify-between h-48 overflow-hidden group ${board.status === 'closed' ? 'opacity-60 grayscale' : ''}`}
-                    >
+                    <div key={board.id} onClick={() => { setActiveBoard(board); setView('board-detail'); }} className={`relative bg-white p-6 rounded-xl shadow-sm border border-slate-200 hover:shadow-md hover:-translate-y-1 transition-all cursor-pointer flex flex-col justify-between h-48 overflow-hidden group ${board.status === 'closed' ? 'opacity-60 grayscale' : ''}`}>
                       <div className={`absolute top-0 left-0 w-1 h-full ${bal >= 0 ? 'bg-emerald-400' : 'bg-rose-400'}`}></div>
                       <div>
-                        <div className="flex justify-between items-start">
-                          <h3 className="font-semibold text-lg text-slate-800 line-clamp-1 pr-2">{board.name}</h3>
-                          {board.parentId && <LinkIcon className="w-4 h-4 text-blue-400 shrink-0" />}
-                        </div>
+                        <div className="flex justify-between items-start"><h3 className="font-semibold text-lg text-slate-800 line-clamp-1 pr-2">{board.name}</h3>{board.parentId && <LinkIcon className="w-4 h-4 text-blue-400 shrink-0" />}</div>
                         <p className="text-xs text-slate-400 mt-1">Updated {new Date(board.createdAt?.seconds * 1000).toLocaleDateString()}</p>
                       </div>
-                      <div>
-                        <span className="text-xs font-medium text-slate-400 uppercase">Current Balance</span>
-                        <div className={`text-3xl font-bold tracking-tight mt-1 ${bal >= 0 ? 'text-slate-800' : 'text-rose-600'}`}>
-                          ¥{bal.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </div>
-                      </div>
-                      <div className="absolute right-4 bottom-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                         <div className="bg-slate-100 p-2 rounded-full text-slate-600">
-                           <ArrowRight className="w-4 h-4" />
-                         </div>
-                      </div>
+                      <div><span className="text-xs font-medium text-slate-400 uppercase">Current Balance</span><div className={`text-3xl font-bold tracking-tight mt-1 ${bal >= 0 ? 'text-slate-800' : 'text-rose-600'}`}>¥{bal.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div></div>
+                      <div className="absolute right-4 bottom-4 opacity-0 group-hover:opacity-100 transition-opacity"><div className="bg-slate-100 p-2 rounded-full text-slate-600"><ArrowRight className="w-4 h-4" /></div></div>
                     </div>
                   );
                 })}
@@ -749,80 +607,30 @@ export default function App() {
           {view === 'board-detail' && activeBoard && (
             <div className="max-w-4xl mx-auto">
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 mb-8 flex items-center justify-between">
-                <div>
-                  <h4 className="text-sm font-medium text-slate-500 uppercase tracking-wide">当前结余</h4>
-                  <div className={`text-5xl font-bold mt-2 ${currentBoardBalance >= 0 ? 'text-slate-800' : 'text-rose-600'}`}>
-                    ¥{currentBoardBalance.toLocaleString()}
-                  </div>
-                  {activeBoard.status === 'closed' && <span className="text-red-500 text-sm font-bold mt-2 block">已停止记账</span>}
-                </div>
-                {activeBoard.status === 'active' && (
-                  <button 
-                    onClick={openAddTxModal}
-                    className="bg-slate-900 hover:bg-slate-800 text-white px-6 py-3 rounded-xl font-medium flex items-center gap-2 shadow-lg shadow-slate-900/20 transition-all hover:scale-105 active:scale-95"
-                  >
-                    <Plus className="w-5 h-5" /> 记一笔
-                  </button>
-                )}
+                <div><h4 className="text-sm font-medium text-slate-500 uppercase tracking-wide">当前结余</h4><div className={`text-5xl font-bold mt-2 ${currentBoardBalance >= 0 ? 'text-slate-800' : 'text-rose-600'}`}>¥{currentBoardBalance.toLocaleString()}</div>{activeBoard.status === 'closed' && <span className="text-red-500 text-sm font-bold mt-2 block">已停止记账</span>}</div>
+                {activeBoard.status === 'active' && <button onClick={openAddTxModal} className="bg-slate-900 hover:bg-slate-800 text-white px-6 py-3 rounded-xl font-medium flex items-center gap-2 shadow-lg shadow-slate-900/20 transition-all hover:scale-105 active:scale-95"><Plus className="w-5 h-5" /> 记一笔</button>}
               </div>
 
-              {/* Transactions List */}
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                  <h3 className="font-bold text-slate-700">收支明细</h3>
-                  <span className="text-xs text-slate-400">{currentBoardTxs.length} 笔交易</span>
-                </div>
+                <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50"><h3 className="font-bold text-slate-700">收支明细</h3><span className="text-xs text-slate-400">{currentBoardTxs.length} 笔交易</span></div>
                 <div className="divide-y divide-slate-100">
-                  {currentBoardTxs.length === 0 ? (
-                    <div className="p-12 text-center text-slate-400">暂无数据</div>
-                  ) : (
-                    currentBoardTxs.map(tx => (
+                  {currentBoardTxs.length === 0 ? <div className="p-12 text-center text-slate-400">暂无数据</div> : currentBoardTxs.map(tx => (
                       <div key={tx.id} className="px-6 py-4 hover:bg-slate-50 transition-colors flex items-center justify-between group">
                         <div className="flex items-center gap-4">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 
-                            ${['allocation_in', 'return_in', 'cover_in'].includes(tx.type) ? 'bg-blue-100 text-blue-600' :
-                              ['allocation_out', 'return_out', 'cover_out'].includes(tx.type) ? 'bg-purple-100 text-purple-600' :
-                              parseFloat(tx.amount) > 0 ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
-                             {['allocation_in', 'allocation_out'].includes(tx.type) ? <LinkIcon className="w-5 h-5" /> : 
-                              ['return_in', 'return_out', 'cover_in', 'cover_out'].includes(tx.type) ? <RefreshCw className="w-5 h-5" /> :
-                              <Wallet className="w-5 h-5" />}
-                          </div>
-                          <div>
-                            <div className="font-medium text-slate-800 flex items-center gap-2">
-                                {tx.description}
-                            </div>
-                            <div className="text-xs text-slate-400">{new Date(tx.date).toLocaleString()}</div>
-                          </div>
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${['allocation_in', 'return_in', 'cover_in'].includes(tx.type) ? 'bg-blue-100 text-blue-600' : ['allocation_out', 'return_out', 'cover_out'].includes(tx.type) ? 'bg-purple-100 text-purple-600' : parseFloat(tx.amount) > 0 ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>{['allocation_in', 'allocation_out'].includes(tx.type) ? <LinkIcon className="w-5 h-5" /> : ['return_in', 'return_out', 'cover_in', 'cover_out'].includes(tx.type) ? <RefreshCw className="w-5 h-5" /> : <Wallet className="w-5 h-5" />}</div>
+                          <div><div className="font-medium text-slate-800 flex items-center gap-2">{tx.description}</div><div className="text-xs text-slate-400">{new Date(tx.date).toLocaleString()}</div></div>
                         </div>
                         <div className="flex items-center gap-6">
-                            <div className={`font-bold font-mono text-lg 
-                               ${parseFloat(tx.amount) > 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
-                              {parseFloat(tx.amount) > 0 ? '+' : ''}{parseFloat(tx.amount).toLocaleString()}
-                            </div>
-                            
-                            {/* 流水操作按钮 (编辑/删除) */}
+                            <div className={`font-bold font-mono text-lg ${parseFloat(tx.amount) > 0 ? 'text-emerald-600' : 'text-slate-800'}`}>{parseFloat(tx.amount) > 0 ? '+' : ''}{parseFloat(tx.amount).toLocaleString()}</div>
                             {activeBoard.status === 'active' && (
                                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button 
-                                        onClick={() => openEditTxModal(tx)}
-                                        className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" 
-                                        title="编辑"
-                                    >
-                                        <Edit className="w-4 h-4" />
-                                    </button>
-                                    <button 
-                                        onClick={() => handleDeleteTransaction(tx.id)}
-                                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded" 
-                                        title="删除"
-                                    >
-                                        <Trash2 className="w-4 h-4" />
-                                    </button>
+                                    <button onClick={() => openEditTxModal(tx)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="编辑"><Edit className="w-4 h-4" /></button>
+                                    <button onClick={() => handleDeleteTransaction(tx.id)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-4 h-4" /></button>
                                 </div>
                             )}
                         </div>
                       </div>
-                    ))
-                  )}
+                    ))}
                 </div>
               </div>
             </div>
@@ -831,19 +639,12 @@ export default function App() {
       </div>
 
       {/* --- MODALS --- */}
-      
       {showAddCatModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="bg-white p-6 rounded-2xl w-96 shadow-2xl relative">
             <button onClick={()=>setShowAddCatModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
             <h3 className="text-lg font-bold mb-4">添加新分类</h3>
-            <form onSubmit={(e) => { e.preventDefault(); handleAddCategory(e.target.catName.value); }}>
-              <input name="catName" autoFocus placeholder="分类名称" className="w-full border border-slate-300 rounded-lg p-3 mb-4 outline-none focus:border-indigo-500" />
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setShowAddCatModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
-                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">添加</button>
-              </div>
-            </form>
+            <form onSubmit={(e) => { e.preventDefault(); handleAddCategory(e.target.catName.value); }}><input name="catName" autoFocus placeholder="分类名称" className="w-full border border-slate-300 rounded-lg p-3 mb-4 outline-none focus:border-indigo-500" /><div className="flex justify-end gap-2"><button type="button" onClick={() => setShowAddCatModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">添加</button></div></form>
           </div>
         </div>
       )}
@@ -853,66 +654,28 @@ export default function App() {
           <div className="bg-white p-6 rounded-2xl w-96 shadow-2xl relative">
             <button onClick={()=>setShowAddBoardModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
             <h3 className="text-lg font-bold mb-4">新建账本</h3>
-            <form onSubmit={(e) => {
-              e.preventDefault();
-              const fd = new FormData(e.target);
-              handleAddBoard({ name: fd.get('name'), parentId: fd.get('parentId'), allocationAmount: fd.get('allocation') });
-            }}>
+            <form onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.target); handleAddBoard({ name: fd.get('name'), parentId: fd.get('parentId'), allocationAmount: fd.get('allocation') }); }}>
               <input name="name" required placeholder="账本名称" className="w-full border border-slate-300 rounded-lg p-3 mb-4 outline-none focus:border-indigo-500" />
-              
-              {!activeCategory && (
-                  <p className="text-xs text-orange-500 mb-2">⚠️ 未选择分类，将默认归入"{categories.find(c=>c.isDefault)?.name || '默认分类'}"</p>
-              )}
-              
-              <select name="parentId" className="w-full border border-slate-300 rounded-lg p-3 mb-4 bg-white outline-none">
-                <option value="">无 (独立账本)</option>
-                {boards.filter(b => b.status === 'active').map(b => (
-                  <option key={b.id} value={b.id}>{b.name} (余额: {getBoardBalance(b.id)})</option>
-                ))}
-              </select>
+              {!activeCategory && <p className="text-xs text-orange-500 mb-2">⚠️ 未选择分类，将默认归入"{categories.find(c=>c.isDefault)?.name || '默认分类'}"</p>}
+              <select name="parentId" className="w-full border border-slate-300 rounded-lg p-3 mb-4 bg-white outline-none"><option value="">无 (独立账本)</option>{boards.filter(b => b.status === 'active').map(b => (<option key={b.id} value={b.id}>{b.name} (余额: {getBoardBalance(b.id)})</option>))}</select>
               <input name="allocation" type="number" step="0.01" placeholder="初始资金 (可选)" className="w-full border border-slate-300 rounded-lg p-3 mb-6 outline-none focus:border-indigo-500" />
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setShowAddBoardModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
-                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">创建</button>
-              </div>
+              <div className="flex justify-end gap-2"><button type="button" onClick={() => setShowAddBoardModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">创建</button></div>
             </form>
           </div>
         </div>
       )}
 
-      {/* 编辑/移动账本 Modal */}
       {showEditBoardModal && activeBoard && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="bg-white p-6 rounded-2xl w-96 shadow-2xl relative">
             <button onClick={()=>setShowEditBoardModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
             <h3 className="text-lg font-bold mb-4">编辑账本</h3>
-            <form onSubmit={(e) => {
-                e.preventDefault();
-                const fd = new FormData(e.target);
-                handleEditBoard(activeBoard.id, fd.get('name'), fd.get('categoryId'));
-            }}>
-              <label className="block text-sm font-medium text-slate-700 mb-1">账本名称</label>
-              <input name="name" defaultValue={activeBoard.name} required className="w-full border border-slate-300 rounded-lg p-3 mb-4 outline-none focus:border-indigo-500" />
-              
-              <label className="block text-sm font-medium text-slate-700 mb-1">所属分类</label>
-              <select name="categoryId" defaultValue={activeBoard.categoryId} className="w-full border border-slate-300 rounded-lg p-3 mb-6 bg-white outline-none">
-                {categories.map(c => (
-                    <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(默认)' : ''}</option>
-                ))}
-              </select>
-
+            <form onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.target); handleEditBoard(activeBoard.id, fd.get('name'), fd.get('categoryId')); }}>
+              <label className="block text-sm font-medium text-slate-700 mb-1">账本名称</label><input name="name" defaultValue={activeBoard.name} required className="w-full border border-slate-300 rounded-lg p-3 mb-4 outline-none focus:border-indigo-500" />
+              <label className="block text-sm font-medium text-slate-700 mb-1">所属分类</label><select name="categoryId" defaultValue={activeBoard.categoryId} className="w-full border border-slate-300 rounded-lg p-3 mb-6 bg-white outline-none">{categories.map(c => (<option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(默认)' : ''}</option>))}</select>
               <div className="flex justify-between pt-2 border-t border-slate-100">
-                <button 
-                    type="button" 
-                    onClick={() => handleDeleteBoard(activeBoard.id)} 
-                    className="px-4 py-2 text-red-500 hover:bg-red-50 rounded-lg flex items-center gap-1 text-sm font-medium"
-                >
-                    <Trash2 className="w-4 h-4" /> 删除账本
-                </button>
-                <div className="flex gap-2">
-                    <button type="button" onClick={() => setShowEditBoardModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
-                    <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存修改</button>
-                </div>
+                <button type="button" onClick={() => handleDeleteBoard(activeBoard.id)} className="px-4 py-2 text-red-500 hover:bg-red-50 rounded-lg flex items-center gap-1 text-sm font-medium"><Trash2 className="w-4 h-4" /> 删除账本</button>
+                <div className="flex gap-2"><button type="button" onClick={() => setShowEditBoardModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存修改</button></div>
               </div>
             </form>
           </div>
@@ -924,46 +687,14 @@ export default function App() {
           <div className="bg-white p-6 rounded-2xl w-96 shadow-2xl relative">
             <button onClick={()=>setShowAddTxModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
             <h3 className="text-lg font-bold mb-4">{editingTx ? "编辑记录" : "记一笔"}</h3>
-            <form onSubmit={(e) => {
-              e.preventDefault();
-              const fd = new FormData(e.target);
-              handleSaveTransaction({ 
-                  amount: fd.get('amount'), 
-                  description: fd.get('desc'), 
-                  type: fd.get('type')
-              });
-            }}>
+            <form onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.target); handleSaveTransaction({ amount: fd.get('amount'), description: fd.get('desc'), type: fd.get('type') }); }}>
               <div className="flex gap-2 mb-4 bg-slate-100 p-1 rounded-lg">
-                <label className="flex-1 text-center cursor-pointer">
-                    <input type="radio" name="type" value="expense" defaultChecked={!editingTx || parseFloat(editingTx.amount) < 0} className="hidden peer" />
-                    <span className="block py-2 rounded peer-checked:bg-white peer-checked:text-rose-600 shadow-sm transition-all">支出</span>
-                </label>
-                <label className="flex-1 text-center cursor-pointer">
-                    <input type="radio" name="type" value="income" defaultChecked={editingTx && parseFloat(editingTx.amount) > 0} className="hidden peer" />
-                    <span className="block py-2 rounded peer-checked:bg-white peer-checked:text-emerald-600 shadow-sm transition-all">收入</span>
-                </label>
+                <label className="flex-1 text-center cursor-pointer"><input type="radio" name="type" value="expense" defaultChecked={!editingTx || parseFloat(editingTx.amount) < 0} className="hidden peer" /><span className="block py-2 rounded peer-checked:bg-white peer-checked:text-rose-600 shadow-sm transition-all">支出</span></label>
+                <label className="flex-1 text-center cursor-pointer"><input type="radio" name="type" value="income" defaultChecked={editingTx && parseFloat(editingTx.amount) > 0} className="hidden peer" /><span className="block py-2 rounded peer-checked:bg-white peer-checked:text-emerald-600 shadow-sm transition-all">收入</span></label>
               </div>
-              <input 
-                name="amount" 
-                type="number" 
-                step="0.01" 
-                required 
-                placeholder="0.00" 
-                defaultValue={editingTx ? Math.abs(parseFloat(editingTx.amount)) : ''}
-                className="w-full text-3xl font-bold text-center border-b-2 p-4 mb-4 outline-none bg-transparent" 
-              />
-              
-              <input 
-                name="desc" 
-                required 
-                placeholder="备注" 
-                defaultValue={editingTx?.description || ''}
-                className="w-full border border-slate-300 rounded-lg p-3 mb-6 outline-none focus:border-indigo-500" 
-              />
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setShowAddTxModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
-                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存</button>
-              </div>
+              <input name="amount" type="number" step="0.01" required placeholder="0.00" defaultValue={editingTx ? Math.abs(parseFloat(editingTx.amount)) : ''} className="w-full text-3xl font-bold text-center border-b-2 p-4 mb-4 outline-none bg-transparent" />
+              <input name="desc" required placeholder="备注" defaultValue={editingTx?.description || ''} className="w-full border border-slate-300 rounded-lg p-3 mb-6 outline-none focus:border-indigo-500" />
+              <div className="flex justify-end gap-2"><button type="button" onClick={() => setShowAddTxModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">保存</button></div>
             </form>
           </div>
         </div>
@@ -975,14 +706,10 @@ export default function App() {
             <button onClick={()=>setShowSettleModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
             <h3 className="text-lg font-bold mb-4 text-center">确认结算?</h3>
             <p className="text-slate-500 text-sm mb-6 text-center">余额 <span className="font-bold">{currentBoardBalance}</span> 将退还给父账本。</p>
-            <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setShowSettleModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button>
-              <button onClick={handleSettleBoard} className="px-4 py-2 bg-indigo-600 text-white rounded-lg">确认</button>
-            </div>
+            <div className="flex justify-end gap-2"><button type="button" onClick={() => setShowSettleModal(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg">取消</button><button onClick={handleSettleBoard} className="px-4 py-2 bg-indigo-600 text-white rounded-lg">确认</button></div>
           </div>
         </div>
       )}
-
     </div>
   );
 }
